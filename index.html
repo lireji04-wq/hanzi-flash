@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>闪字挑战 · Hanzi Flash</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,"Microsoft YaHei",sans-serif;background:#131519;color:#f5f1e6}
+*{box-sizing:border-box}body{margin:0}main{width:min(760px,100% - 32px);margin:clamp(25px,7vh,80px) auto}
+header{display:flex;justify-content:space-between;align-items:center;gap:16px}h1{font-size:42px;letter-spacing:.12em;margin:0}p{color:#b6b6ae;line-height:1.6}
+.stage{border:1px solid #383b3e;border-radius:24px;background:#1c2024;overflow:hidden;position:relative}
+canvas{width:100%;display:block;aspect-ratio:2.5}.caption{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;text-align:center;font-size:clamp(16px,4vw,26px);padding:16px;color:#eee7d8}
+.track{display:flex;gap:6px;margin:12px 0 20px}.track span{height:4px;flex:1;background:#36393b;border-radius:4px}.track .on{background:#d5fc87}
+button,input,select{font:inherit;border-radius:10px;padding:11px 14px}button{border:0;background:#d5fc87;color:#17220c;font-weight:700;cursor:pointer}
+button.secondary,input,select{background:#262a2e;color:#f5f1e6;border:1px solid #494d50}input{min-width:0;flex:1}form{display:flex;gap:8px} [hidden]{display:none!important}
+#custom-setting{margin-bottom:12px}.controls{display:flex;gap:8px;flex-wrap:wrap}#feedback{min-height:1.6em;color:#d5fc87}#score,label{font-size:14px;color:#c8c8bc}label{display:flex;align-items:center;gap:8px}
+</style>
+</head>
+<body><main>
+<header><h1>闪字挑战</h1><span id="score"></span></header>
+<p>字形化成方形像素格，每格只出现一帧。记住三帧里的格子位置，拼出原词。</p>
+<section class="stage" aria-label="字形显示区"><canvas width="750" height="300" aria-hidden="true"></canvas><div class="caption" id="caption">准备好后，开始看字</div></section>
+<div class="track" aria-hidden="true"><span></span><span></span><span></span></div>
+<form hidden><input aria-label="输入你看到的词" placeholder="输入你看到的词" autocomplete="off" required><button>提交</button></form>
+<p id="feedback" role="status"></p>
+<label id="custom-setting">自定义出题 <input id="custom-word" type="text" placeholder="输入 2–4 个汉字，留空用题库" autocomplete="off"></label>
+<div class="controls">
+<button id="start">开始</button><button id="skip" class="secondary" hidden>揭晓答案</button>
+<label id="setting">每帧时长 <select aria-label="每帧时长"><option value="1200">1.2 秒</option><option value="700">0.7 秒</option><option value="400">0.4 秒</option></select></label>
+</div>
+</main>
+<script>
+const words = ['大象','月亮','苹果','火车','森林','西瓜','彩虹','企鹅'];
+const get = selector => document.querySelector(selector);
+const canvas = get('canvas');
+const ctx = canvas.getContext('2d');
+const caption = get('#caption');
+const feedback = get('#feedback');
+const form = get('form');
+const input = get('form input');
+const customInput = get('#custom-word');
+const start = get('#start');
+const skip = get('#skip');
+const setting = get('#setting');
+const track = [...document.querySelectorAll('.track span')];
+let round = 0;
+let correct = 0;
+let phase = 'ready';
+let activeWord = '';
+let activeFrames = [];
+let isCustom = false;
+function score() {
+  get('#score').textContent = '第 ' + Math.min(round + 1, words.length) + '/' + words.length + ' 题 · 答对 ' + correct;
+}
+function clear(message = '', frame = -1) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  caption.textContent = message;
+  track.forEach((bar, index) => bar.classList.toggle('on', index <= frame));
+}
+function wordLayout(word) {
+  const letters = [...word];
+  const size = letters.length === 4 ? 152 : 174;
+  const spacing = size + 22;
+  return letters.map((letter, index) => ({
+    letter,
+    center: canvas.width / 2 + (index - (letters.length - 1) / 2) * spacing,
+    size
+  }));
+}
+function drawWord(layout) {
+  ctx.fillStyle = '#f2f1df';
+  ctx.font = 'bold ' + layout[0].size + 'px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { letter, center } of layout) ctx.fillText(letter, center, 150);
+}
+function splitWord(word) {
+  clear();
+  const layout = wordLayout(word);
+  drawWord(layout);
+  const { width, height } = canvas;
+  const ink = ctx.getImageData(0, 0, width, height).data;
+  const frames = Array.from({ length: 3 }, () => ctx.createImageData(width, height));
+  const cell = 8;
+  const spacing = layout[1].center - layout[0].center;
+  const leftEdge = layout[0].center - spacing / 2;
+  const glyphCells = layout.map(() => []);
+  for (let y = 0; y < height; y += cell) {
+    for (let x = 0; x < width; x += cell) {
+      const sampleX = Math.min(x + cell / 2, width - 1);
+      const sampleY = Math.min(y + cell / 2, height - 1);
+      if (ink[(sampleY * width + sampleX) * 4 + 3] < 128) continue;
+      const index = Math.max(0, Math.min(layout.length - 1, Math.floor((sampleX - leftEdge) / spacing)));
+      glyphCells[index].push([x, y]);
+    }
+  }
+  for (const cells of glyphCells) {
+    const angle = Math.random() * 2 * Math.PI;
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    const bend = Math.random() * 2 * Math.PI;
+    const ordered = cells.map(([x, y]) => ({
+      x,
+      y,
+      rank: x * dx + y * dy
+        + 22 * Math.sin((-x * dy + y * dx) / 26 + bend)
+        + (Math.random() - 0.5) * 35
+    })).sort((a, b) => a.rank - b.rank);
+    const order = [0, 1, 2];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    ordered.forEach(({ x, y }, index) => {
+      const band = Math.floor(index * frames.length / ordered.length);
+      const pixels = frames[order[band]].data;
+      for (let py = y; py < Math.min(y + cell, height); py++) {
+        for (let px = x; px < Math.min(x + cell, width); px++) {
+          pixels.set([242, 241, 223, 255], (py * width + px) * 4);
+        }
+      }
+    });
+  }
+  return frames;
+}
+function showFrame(fragment, index) {
+  clear('', index);
+  ctx.putImageData(fragment, 0, 0);
+}
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function play() {
+  if (phase !== 'ready' && phase !== 'result') return;
+  const customWord = customInput.value.trim();
+  if (customWord && !/^\p{Unified_Ideograph}{2,4}$/u.test(customWord)) {
+    feedback.textContent = '请输入 2 到 4 个汉字，中间不要加空格。';
+    customInput.focus();
+    return;
+  }
+  isCustom = Boolean(customWord);
+  if (!isCustom && round === words.length) { round = 0; correct = 0; }
+  activeWord = customWord || words[round];
+  customInput.value = '';
+  get('#custom-setting').hidden = true;
+  phase = 'watch';
+  if (isCustom) get('#score').textContent = '自定义 · ' + [...activeWord].length + ' 字'; else score();
+  feedback.textContent = '';
+  start.hidden = true;
+  setting.hidden = true;
+  const duration = Number(get('select').value);
+  const frames = activeFrames = splitWord(activeWord);
+  clear('看屏幕');
+  await delay(650);
+  for (const [index, frame] of frames.entries()) {
+    showFrame(frame, index);
+    await delay(duration);
+    if (index < frames.length - 1) {
+      clear('', index);
+      await delay(280);
+    }
+  }
+  clear('刚才看到的是什么词？', frames.length - 1);
+  phase = 'answer';
+  form.hidden = false;
+  skip.hidden = false;
+  input.value = '';
+  input.focus();
+}
+function reveal(answer) {
+  if (phase !== 'answer') return;
+  const word = activeWord;
+  const matched = answer === word;
+  if (!isCustom) {
+    if (matched) correct++;
+    round++;
+  }
+  phase = 'result';
+  clear();
+  const combined = ctx.createImageData(canvas.width, canvas.height);
+  for (const frame of activeFrames) {
+    for (let i = 0; i < frame.data.length; i += 4) {
+      if (frame.data[i + 3]) combined.data.set(frame.data.subarray(i, i + 4), i);
+    }
+  }
+  ctx.putImageData(combined, 0, 0);
+  get('#custom-setting').hidden = false;
+  form.hidden = true;
+  skip.hidden = true;
+  setting.hidden = false;
+  feedback.textContent = (matched ? '答对了！' : '答案是「' + word + '」。') +
+    (!isCustom && round === words.length ? ' 本轮答对 ' + correct + '/' + words.length + ' 题。' : '');
+  start.textContent = isCustom ? '开始下一题' : round === words.length ? '再玩一轮' : '下一题';
+  start.hidden = false;
+  if (!isCustom) get('#score').textContent = '已完成 ' + round + '/' + words.length + ' 题 · 答对 ' + correct;
+  start.focus();
+}
+start.addEventListener('click', play);
+skip.addEventListener('click', () => reveal(null));
+form.addEventListener('submit', event => {
+  event.preventDefault();
+  const answer = input.value.replace(/\s/g, '');
+  if (answer) reveal(answer);
+});
+score();
+</script>
+</body>
+</html>
